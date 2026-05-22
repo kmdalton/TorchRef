@@ -2176,13 +2176,43 @@ class ReflectionData(CrystalDataset, DebugMixin):
         delph = np.angle(mfo_complex, deg=True)
 
         # Anomalous difference map coefficients. The anomalous-difference Fourier
-        # uses |ΔF_ano| with phase (phi_model - 90deg); peaks then fall on the
-        # anomalous scatterers (verified against the Zn site of thermolysin:
-        # phi-90 gives +2.6 sigma, phi+90 gives a -2.6 sigma hole). ANOM is stored
-        # signed, so the (-) member maps to phi-270 (= the +180deg / negative-
-        # amplitude equivalent of phi-90).
+        # uses the signed Bijvoet difference dF = |F(+)| - |F(-)| with phase
+        # (phi_model - 90deg); peaks then fall on the anomalous scatterers
+        # (verified against the Zn site of thermolysin: phi-90 gives +2.6 sigma,
+        # phi+90 gives a -2.6 sigma hole). We store this in the phenix convention:
+        # ANOM = |dF| (always positive) and the sign of dF is carried by a 180deg
+        # phase flip in PANOM, so the (-) member maps to phi-270 (= phi+90). The
+        # product ANOM*exp(i*PANOM) then reproduces the signed dF*exp(i(phi-90)).
         anom = Fobs_p_out - Fobs_m_out
         panom = np.where(anom < 0.0, ph_disp - 270.0, ph_disp - 90.0)
+        anom = np.abs(anom)
+        # Centrics obey Friedel's law even under anomalous scattering, so their
+        # Bijvoet difference is exactly zero; any measured value is noise that
+        # inflates the anomalous-map RMS and depresses peak sigma levels. Phenix
+        # omits centrics from ANOM/PANOM entirely -- match that.
+        anom[centric] = np.nan
+        panom[centric] = np.nan
+
+        # Sigma_A-weighted map coefficients (phenix 2FOFCWT/PH2FOFCWT for the
+        # best 2mFo-DFc map and FOFCWT/PHFOFCWT for the mFo-DFc difference map),
+        # provided alongside the unweighted FWT/PHWT above. Needs the resolution
+        # and a work-set mask on the canonical ASU groups.
+        from torchref.maps.sigmaa import sigmaa_map_coefficients
+
+        s_uniq = math_torch.get_scattering_vectors(
+            uniq.to(self.cell.data.device), self.cell.data
+        )
+        dHKL_uniq = (1.0 / torch.linalg.norm(s_uniq, dim=1)).detach().cpu().numpy()
+        if rfree is not None:
+            rf_tmp = np.zeros(M, dtype=int)
+            rf_tmp[has_minus] = rfree[mi][has_minus]
+            rf_tmp[has_plus] = rfree[pi][has_plus]
+            work_mask = rf_tmp == 0
+        else:
+            work_mask = np.ones(M, dtype=bool)
+        sa = sigmaa_map_coefficients(
+            Fobs_disp, Fc_disp_amp, ph_disp, centric, dHKL_uniq, work_mask
+        )
 
         uniq_np = uniq.numpy()
         data = {
@@ -2202,6 +2232,10 @@ class ReflectionData(CrystalDataset, DebugMixin):
             "PHWT": ph_disp,
             "DELFWT": delf,
             "PHDELWT": delph,
+            "2FOFCWT": sa["2FOFCWT"],
+            "PH2FOFCWT": sa["PH2FOFCWT"],
+            "FOFCWT": sa["FOFCWT"],
+            "PHFOFCWT": sa["PHFOFCWT"],
             "ANOM": anom,
             "PANOM": panom,
         }
@@ -2218,7 +2252,10 @@ class ReflectionData(CrystalDataset, DebugMixin):
         # The display-map / merged columns must be FFT-safe (no NaN); the
         # anomalous (+/-) columns may legitimately carry NaN where a mate is
         # absent (incomplete anomalous data), matching phenix output.
-        for key in ("F-obs", "F-model", "PH-model", "FWT", "PHWT", "DELFWT", "PHDELWT"):
+        for key in (
+            "F-obs", "F-model", "PH-model", "FWT", "PHWT", "DELFWT", "PHDELWT",
+            "2FOFCWT", "PH2FOFCWT", "FOFCWT", "PHFOFCWT",
+        ):
             data[key] = np.nan_to_num(data[key], nan=0.0)
 
         return pd.DataFrame(data)
